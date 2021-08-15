@@ -1,8 +1,6 @@
 # Intro
 
-Zoom is the web and app based video conferencing service (http://zoom.us). This
-plugin offers tight integration with Moodle, supporting meeting creation,
-synchronization, grading, and backup/restore.
+This is a modded version of Zoom Moodle Extention to enable Secured Meetings in Zoom
 
 # Prerequisites
 
@@ -12,191 +10,135 @@ To connect to the Zoom APIs this plugin requires an account level JWT app to be
 created. To create an account-level JWT app the Developer Role Permission is
 required.
 
-See https://marketplace.zoom.us/docs/guides/build/jwt-app. You will need to
-create a JWT app and that will generate the API key and secret.
-
 ## Installation
 
 1. Install plugin to mod/zoom. More details at https://docs.moodle.org/39/en/Installing_plugins#Installing_a_plugin
-2. Once you install the plugin you need to set the following set the following
-   settings to enable the plugin:
+2. Do the modifications as below.
+   - Add loading.gif to root folder
+   - Add loadregistrant.php to root folder
+   - Add zoomcallback.php to root folder
+   - Add reload.min.js to amd/build folder
+4. Add `option_multiple_devices` and `option_secured_meeting` to mdl_zoom table as boolean fields.
+5. Add the secure meetings table to database.
+6. Do modifications to below files.
 
-- Zoom API key (mod_zoom | apikey)
-- Zoom API secret (mod_zoom | apisecret)
-- Zoom home page URL (mod_zoom | zoomurl), Link to your organization's custom Zoom landing page.
+#### lang/en/zoom.php
+Add below code to bottom of the file
+```
+// --- MOD ZOOM --- //
+$string['secured'] = 'Secured Meeting';
+$string['option_secured_meeting'] = 'Only the users from the LMS will be allowed to join';
+$string['option_secured_meeting_help'] = 'Enabling this option requires all attendees to sign in with their LMS account to be able to join the meeting. Sharing link and joining the meeting is not possible.';
+$string['multiple_devices'] = 'Multiple Devices';
+$string['option_multiple_devices'] = 'Allow registrants to join from multiple devices';
+$string['option_multiple_devices_help'] = 'Enabling this option allow registrants to join from multiple devices using the same link.';
+// --- END MOD ZOOM --- //
+```
+#### mod_form.php
+Add below code at 308 line
+```
+// --- MOD ZOOM --- //
+// Add secure meeting widget.
+$mform->addElement('advcheckbox', 'option_secured_meeting', get_string('secured', 'zoom'),
+       get_string('option_secured_meeting', 'zoom'));
+$mform->addHelpButton('option_secured_meeting', 'option_secured_meeting', 'zoom');
 
-Please note that the API key and secret is not the same as the LTI key/secret.
+// Allow registrants to join from multiple devices widget.
+$mform->addElement('advcheckbox', 'option_multiple_devices', get_string('multiple_devices', 'zoom'),
+       get_string('option_multiple_devices', 'zoom'));
+$mform->addHelpButton('option_multiple_devices', 'option_multiple_devices', 'zoom');
+// --- END MOD ZOOM --- //
+```
+#### classes/webservice.php
+Add below code at line 528
+```
+// --- MOD ZOOM --- //
+if (isset($zoom->option_multiple_devices)) {
+   $data['settings']['allow_multiple_devices'] = (bool) $zoom->option_multiple_devices;
+}
+if (isset($zoom->option_secured_meeting)) {
+   $data['settings']['approval_type'] = (int) $zoom->option_secured_meeting;
+}
+// --- END MOD ZOOM --- //
+```
+Add below code to the bottom of the file
+```
+// --- MOD ZOOM --- //
+/**
+* Create a meeting registrant on Zoom and approve.
+* Take a $zoom object as returned from the Moodle form and respond with an object that can be saved to the database.
+*
+* @param stdClass $zoom The meeting to create.
+* @return stdClass The call response.
+*/
+public function create_registrant($USER, $zoom) {
+  // Provide license if needed.
+  $this->provide_license($zoom->host_id);
+  $url = (!empty($zoom->webinar) ? 'webinars' : 'meetings') . "/" . $zoom->meeting_id . "/registrants";
+  $data = array(
+      'email' => $USER->email,
+      'first_name' => $USER->firstname,
+      'last_name' => $USER->lastname,
+  );
+  $registrant = $this->_make_call($url, $data, 'post');
 
-If you get "Access token is expired" errors, make sure the date/time on your
-server is properly synchronized with the time servers.
+  $url = (!empty($zoom->webinar) ? 'webinars' : 'meetings') . "/" . $zoom->meeting_id . "/registrants/status";
+  $approveRegistrant = array(
+      'id' => $registrant->registrant_id,
+      'email' => $USER->email
+  );
+  $data = array(
+      'action' => 'approve',
+      'registrants' => array($approveRegistrant)
+  );
+  $this->_make_call($url, $data, 'put');
 
-## Changelog
+  return $registrant;
+}
+// --- END MOD ZOOM --- //
+```
+#### view.php
+Add below code at line 126
+```
+// --- MOD ZOOM --- //
+$strsecuredmeeting = get_string('secured', 'mod_zoom');
+$strallowmultipledevices = get_string('option_multiple_devices', 'mod_zoom');
+// --- END MOD ZOOM --- //
+```
+Add below code at line 381
+```
+// --- MOD ZOOM --- //
+$table->data[] = array($strallowmultipledevices, ($zoom->option_multiple_devices) ? $stryes : $strno);
 
-v3.8.1
+$table->data[] = array($strsecuredmeeting, ($zoom->option_secured_meeting) ? $stryes : $strno);
+// --- END MOD ZOOM --- //
+```
+#### loadmeeting.php
+Add below code at line 88 replacing existing join url redirection
+```
+// --- MOD ZOOM --- //
+if ($zoom->option_secured_meeting) {
+  $zoom_log = $DB->get_record('zoom_secured_meetings', array ('userid' => $USER->id, 'meeting_id' => $zoom->meeting_id), $fields='*', $strictness=IGNORE_MISSING);
+  if ($zoom_log) {
+      if ($zoom_log->join_url) {
+          $nexturl = new moodle_url($zoom_log->join_url, array('uname' => fullname($USER)));
+      }else{
+          $nexturl = new moodle_url('/mod/zoom/loadregistrant.php', array('id' => $id, 'log' => $zoom_log->id));
+      }
+  }else{
+      $service = new mod_zoom_webservice();
+      $registrant = $service->create_registrant($USER, $zoom);
 
-- Only allow real host to use start_url #285 (thanks @abias for reporting)
+      $data['userid'] = $USER->id;
+      $data['meeting_id'] = $zoom->meeting_id;
+      $data['participantid'] = $registrant->registrant_id;
 
-v3.8
+      $logid = $DB->insert_record('zoom_secured_meetings', $data, $returnid=true, $bulk=false);
 
-- Add support for Ionic 5 #269 (thanks @dpalou)
-- Improve update_meetings scheduled task #263 (thanks @abias)
-- Re-enable mustache continuous integration #276
-- Treat alternative hosts as a possible host #275
-- Update `exists_on_zoom` consistently #273 (thanks @abias for reporting)
-- Update `timemodified` only when needed #279 (thanks @abias for reporting)
-- Fix meeting invitation issues #267, #274 (thanks @abias, @nstefanski, @andrewmadden for feedback)
-
-v3.7
-
-- Allow administrators to selectively remove Meeting Invitation details #235 (thanks @andrewmadden)
-  - New capabilities `mod/zoom:viewjoinurl` and `mod/zoom:viewdialin`
-- Track completion for mobile users #238 (thanks @nstefanski, @tzerafnx)
-- Fix backup and restore of several zoom activity-level fields #247 (thanks @abias)
-- Fix meeting reports task for some already-numeric end times #236 (thanks @lcollong)
-- Fix list of alternative hosts to only include active users #252 (thanks @abias)
-- Fix PHP 7.1 compatibility issue #243
-- Fix encryption type validation #232 (thanks @abias)
-- Clean up error messages / efficiency on the view page #245 (thanks @abias)
-
-v3.6
-
-- Fixed fatal regression on settings.php for Moodle < 3.7 (Thanks abias)
-- Fixed debugging messages that occur for users without webinar licenses
-- Various string improvements
-
-v3.5
-
-- Removed language translations. Please submit language translations to AMOS (https://lang.moodle.org/)
-- Fixed bug causing downloading of meeting participation reports to fail
-- Added new settings for E2EE, Webinars, Alternative hosts, Download iCal,
-  Meeting capacity warning, and Enable meeting links (Thanks abias)
-- Improved UI for admin and module settings (Thanks abias)
-- Support for admins to update Zoom meeting participation reports
-- Quick editing Zoom meeting name will now update calendar event
-- Support for more advanced passcode requirements
-- This will be the last supported release by UCLA. This plugin will now be maintained by jrchamp and NC State DELTA.
-
-v3.4
-
-- Used Dashboard API to improve get_meeting_reports task
-- Added meeting invite text to calendar and meeting page to provide phone details
-- Zoom meetings now appear in Timeline block (Thanks nstefanski)
-- Added basic Analytic indicators (Thanks danmarsden)
-- Fixed calendar icon not showing up for non-Boost themes (Thanks danowar2k)
-- Added support for Moodle 3.10
-- Allow privileged users without Zoom to edit meetings (Thanks jrchamp)
-- Fixed bugs related to scheduler support (Thanks jrchamp)
-- Fixed participant count for meeting sessions so it only counts unique users
-- Zoom descriptions keep HTML formatting (Thanks mhughes2k)
-- Fixed failing DB schema checks (Thanks dvdcastro)
-- Requiring passcodes is now a site wide configuration
-
-v3.3
-
-- Fixed problems with error handling (Thanks kbowlerarden and jrchamp)
-- Added language translations for uk, pl, and ru (Thanks mkikets99)
-- Thanks to kubilayagi for all his work on the Zoom plugin these past 2.5 years and good luck on future endeavors
-
-v3.2
-
-- Password/Passcode changes
-  - Renamed passwords to passcodes
-  - Added passcodes to Webinars (Thanks jrchamp)
-  - Passcodes are now required
-- Implement completion viewed when user joins meeting (Thanks nstefanski)
-- License recycling improvement (Thanks mrvinceo)
-- Added scheduler support (Thanks mhughes2k)
-- Added support for Zoom API changes related to next_page_token and rate limiting
-- Fixed error handling for non-English Zoom deployments
-- Added Travis CI support
-
-v3.1
-
-- Added site config to mask participant data form appearing in reports (useful for sites that mask participant data, e.g., for HIPAA) (Thanks stopfstedt)
-
-v3.0
-
-- Support Retry-After header in Zoom API
-- Supports longer Zoom meeting ids
-- Added more meeting options: Mute upon entry, Enable waiting room, Only authenticated users. - Changed to be Host/Participant video to off by default
-- Meeting have passwords set by default
-- Improvements to "Get meeting report" task to better handle data errors
-- Removed "Attendee attention" column in participant report, because it has been removed by Zoom
-- Added a new setting 'proxyurl' that can be used to set a proxy as hostname:port. This will be used for communication with the Zoom API (but not anywhere else in Moodle). (Thanks pefeigl)
-- Fixed meeting dates during restore (Thanks nstefanski)
-- Added German translation (Thanks pefeigl)
-
-v2.2
-
-- Resized svg icon (Thanks stopfstedt)
-- Fixed error handling for 'User not found on this account' (Thanks nstefanski and tzerafnx)
-- Incorrect return value for zoom_update_instance (Thanks jrchamp)
-- Added global search support
-- Fixed inconsistent "start_time" column (Thanks tuanngocnguyen)
-
-v2.1
-
-- Moodle 3.7 support (Thanks danmarsden)
-- Privacy API support
-- Moodle mobile support fixed for 3.5 (Thanks nstefanski)
-- iCal generation
-- Various bug fixes/improvements.
-
-v2.0.1
-
-- Fixing conflicts with Firebase\JWT library. If more conflicts are found,
-  please contact plugin maintainer to add whitelist in classes/webservice.php.
-
-v2.0
-
-- Updated to support Zoom API V2
-- Added SVG icon for resolution independence (Thanks rrusso)
-- Additional logging
-- License recycling (Thanks tigusigalpa)
-- Participant reports improved (local storage and added attentiveness score)
-- GDPR compliance
-- Support for alternative hosts
-
-v1.7
-
-- Lang string BOM fix (Thanks roperto/tonyjbutler)
-- Support for proxy servers (Thanks jonof)
-- Improved handling of meetings not found on Zoom
-- Exporting of session participants to xls
-- Improved participants report
-- Fixing coding issues
-
-v1.6
-
-- Addressed coding issues brought up by a MoodleRooms review done for CSUN.
-
-v1.5
-
-- Fixed upgrade issues with PostgreSQL
-
-v1.4
-
-- Added missing lang string for cache.
-- Updated activity chooser help text.
-- Added support for webinars.
-- Fixing Unicode issues.
-
-v1.3
-
-- Fixed join before host option.
-- Added Zoom user reports.
-- Added connection status checking on settings page.
-
-v1.2
-
-- Allowing Zoom users to be found by other login types than just SSO.
-
-v1.1
-
-- Issue #1: allow underscores in API key and secret.
-- Issue #2: Fix language strings to not use concatenation.
-- Added support for "group members only".
-
-v1.0
-
-- Initial release
+      $nexturl = new moodle_url('/mod/zoom/loadregistrant.php', array('id' => $id, 'log' => $logid));
+  }
+}else{
+  $nexturl = new moodle_url($zoom->join_url, array('uname' => fullname($USER)));
+}
+// --- END MOD ZOOM --- //
+```
