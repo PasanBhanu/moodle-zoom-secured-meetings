@@ -20,7 +20,8 @@ required.
    - Add reload.min.js to amd/build folder
 4. Add `option_multiple_devices` and `option_secured_meeting` to mdl_zoom table as boolean fields.
 5. Add the secure meetings table to database.
-6. Do modifications to below files.
+6. Add meeting registrant created webhook to Zoom : https://yourwebsite.com/mod/zoom/zoomcallback.php
+7. Do modifications to below files.
 
 #### lang/en/zoom.php
 Add below code to bottom of the file
